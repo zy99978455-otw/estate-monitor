@@ -1,0 +1,34 @@
+version: '3'
+services:
+  # 1. Redis: 用于存储验证可用的代理 IP
+  redis:
+    image: redis:alpine
+    container_name: proxy_redis
+    ports:
+      - "56379:6379"
+
+  # 2. Proxy Pool: 自动抓取免费代理并验证，提供 API 给爬虫用
+  proxy_pool:
+    image: jhao104/proxy_pool:latest
+    container_name: proxy_pool
+    ports:
+      - "5010:5010"
+    depends_on:
+      - redis
+    environment:
+      - DB_CONN=redis://redis:6379/0
+
+# 3. MySQL: 房产数据存储 (新增)
+  mysql:
+    image: mysql:8.0
+    container_name: estate_mysql
+    ports:
+      - "53308:3306"  # 主机端口:容器端口 (如果本地装了MySQL占用了3306，就把左边改成 3307)
+    environment:
+      MYSQL_ROOT_PASSWORD: root   # 密码
+      MYSQL_DATABASE: estate_db   # 自动创建的数据库名
+      MYSQL_TZ: Asia/Shanghai     # 设置时区
+    volumes:
+      - ./data/mysql:/var/lib/mysql # 数据持久化挂载到当前目录
+    command: --default-authentication-plugin=mysql_native_password
+    # ↑ MySQL 8.0 必须要这行命令，否则 Python 的旧版驱动可能连不上

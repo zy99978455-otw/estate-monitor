@@ -205,3 +205,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Python / Environment
+venv/
+__pycache__/
+*.pyc
+
+# 📦 Docker Volumes & Temporary Files (新增或修改)
+# 确保 Git 忽略整个 data 目录下的内容
+data/
+# 临时文件，防止 MySQL 运行时的 socket 冲突
+*.sock
+*.pid
