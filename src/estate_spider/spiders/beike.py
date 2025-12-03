@@ -1,35 +1,33 @@
 import scrapy
 import json
 from scrapy.http import HtmlResponse
-from ..items import EstateItem
+# 假设你的 items.py 在上一级目录
+from ..items import EstateItem 
 
 class BeikeSpider(scrapy.Spider):
     name = "beike"
     allowed_domains = ["cd.ke.com"]
     
-    # ============================================================
-    # 🔧 最终确认配置
-    # ============================================================
-    
-    # 1. 区域基准地址 (棕北)
-    BASE_URL = "https://cd.ke.com/ershoufang/zongbei/"
-    
-    # 2. 筛选参数 (完全按照你的 URL)
-    # co32: 最新发布
-    # l2l3: 二室、三室
-    # p5:   价格区间 (100-150万)
+    BASE_URL = "https://cd.ke.com/ershoufang/"
+    REGIONS = ["zongbei", "yulin"]
     FILTER_CODE = "co32l2l3p5"
 
     def start_requests(self):
-            # 第 1 页 URL: https://cd.ke.com/ershoufang/zongbei/co32l2l3p5/
-            first_page_url = f"{self.BASE_URL}{self.FILTER_CODE}/"
+        # 1. 遍历区域列表 (修复 URL 拼接错误)
+        for region in self.REGIONS:
+            # 正确构造: .../ershoufang/zongbei/co32.../
+            first_page_url = f"{self.BASE_URL}{region}/{self.FILTER_CODE}/"
             
             yield scrapy.Request(
                 first_page_url,
                 meta={
                     "playwright": True,
                     "playwright_include_page": True,
-                    "is_first_page": True, # 开启第一页人工验证
+                    "is_first_page": True,
+                    # 关键修复：传递当前区域，用于后续翻页拼接
+                    "current_region": region, 
+                    # 关键修复：指定 context_name，让所有页面共享同一个浏览器Session (保留验证码Cookie)
+                    "playwright_context": "persistent_context", 
                 },
                 callback=self.parse
             )
@@ -37,48 +35,39 @@ class BeikeSpider(scrapy.Spider):
     async def parse(self, response):
         page = response.meta["playwright_page"]
         is_first_page = response.meta.get("is_first_page", False)
+        # 取出当前区域
+        current_region = response.meta.get("current_region")
 
-        # ============================================================
-        # 🛑 第一页专属逻辑：人工干预 (只在第一次启动时触发)
-        # ============================================================
+        # --- 第一页人工干预逻辑 ---
         if is_first_page:
             print("="*60)
-            print(f"🕵️‍♂️ [Playwright] 浏览器已启动！正在渲染第一页...")
-            print("🚨🚨🚨 【人工干预时刻】 🚨🚨🚨")
-            print("1. 请在浏览器中手动完成验证码。")
-            print("2. 确认浏览器里已经出现了【房源列表】。")
-            print("3. 确认无误后，代码将自动检测并开始跑全量数据...")
+            print(f"🕵️‍♂️ [正在初始化区域]: {current_region}")
+            print("🚨 如遇验证码，请在弹出的浏览器中手动完成！")
             print("="*60)
 
-            # 智能轮询等待 (最多等 120秒)
-            for i in range(20):
-                try:
-                    # 尝试寻找分页数据 div (这标志着页面加载完全成功)
-                    await page.wait_for_selector('div.house-lst-page-box', timeout=6000)
-                    print("🎉 检测到页面加载成功！开始自动化采集...")
-                    break
-                except:
-                    print(f"⏳ ({i+1}/20) 等待人工过验证码...")
-                    # 模拟鼠标轻微晃动，防止被判定为死链接
-                    await page.mouse.move(100, 100)
+            try:
+                # 等待列表容器出现
+                await page.wait_for_selector('div.house-lst-page-box', timeout=60000) # 延长到60秒给人工留时间
+                print("🎉 页面加载成功！")
+            except:
+                print("⚠️ 等待超时，可能被反爬或加载失败")
+
         else:
-            # 后续页面：只需要简单等待列表出现即可
-            print(f"🔄 [自动翻页] 正在抓取: {response.url}")
+            print(f"🔄 [翻页中] {current_region} - {response.url}")
             try:
                 await page.wait_for_selector('ul.sellListContent', timeout=10000)
             except:
-                print(f"⚠️ 警告: 页面加载超时 {response.url}")
+                pass
 
-        # ============================================================
-        # 📥 数据提取逻辑
-        # ============================================================
+        # --- 提取数据 ---
         content = await page.content()
-        await page.close() # 抓完当前页就关闭这个 Page tab
+        await page.close() # 关闭当前页签
         
+        # 重新封装 Response
         response = HtmlResponse(url=response.url, body=content, encoding='utf-8')
         house_list = response.css('ul.sellListContent li.clear')
-
-        print(f"✅ [本页数据] 提取到 {len(house_list)} 条房源")
+        
+        print(f"✅ [{current_region}] 提取到 {len(house_list)} 条房源")
 
         for house in house_list:
             item = EstateItem()
@@ -89,45 +78,42 @@ class BeikeSpider(scrapy.Spider):
             position_info = house.css('.positionInfo a::text').getall()
             item['region'] = "-".join(position_info[1:]) if len(position_info) > 1 else ""
             
-            # ✨ 修复：合并 houseInfo 下的所有文本，防止抓到空值
-            info_texts = house.css('.houseInfo *::text').getall()
-            item['house_info'] = "".join(info_texts).strip()
+            # 清理换行符
+            raw_info = "".join(house.css('.houseInfo *::text').getall())
+            item['house_info'] = raw_info.replace("\n", "").strip()
             
             item['total_price'] = house.css('.totalPrice span::text').get()
             item['unit_price'] = house.css('.unitPrice span::text').get()
-
+            
             yield item
 
-        # ============================================================
-        # 📑 自动翻页逻辑 (只在第一页触发)
-        # ============================================================
+        # --- 自动翻页逻辑 ---
         if is_first_page:
-            # 1. 从 HTML 中提取分页数据
-            # 贝壳的分页信息在 <div class="page-box ..." page-data='{"totalPage":5,"curPage":1}'>
             page_data_str = response.css('div.house-lst-page-box::attr(page-data)').get()
             
             if page_data_str:
                 try:
                     page_data = json.loads(page_data_str)
                     total_page = page_data.get("totalPage", 0)
-                    print(f"📚 [分页分析] 共检测到 {total_page} 页数据，开始生成后续任务...")
+                    print(f"📚 [{current_region}] 共 {total_page} 页，开始生成任务...")
 
-                    # 2. 循环生成后续页面的 Request
-                    # 从第 2 页 到 第 total_page 页
                     for page_num in range(2, total_page + 1):
-                        # 构造 URL: .../zongbei/pg2co32l2l3p5/
-                        next_url = f"{self.BASE_URL}pg{page_num}{self.FILTER_CODE}/"
+                        # 修复 URL：带上 current_region
+                        # 格式: .../ershoufang/zongbei/pg2co32.../
+                        next_url = f"{self.BASE_URL}{current_region}/pg{page_num}{self.FILTER_CODE}/"
                         
                         yield scrapy.Request(
                             next_url,
                             meta={
                                 "playwright": True,
                                 "playwright_include_page": True,
-                                "is_first_page": False, # 🚩 标记：后续页面不需要人工干预
+                                "is_first_page": False,
+                                "current_region": current_region, # 传递区域信息
+                                "playwright_context": "persistent_context", # 保持 Session
                             },
                             callback=self.parse
                         )
                 except Exception as e:
-                    print(f"❌ 解析分页数据失败: {e}")
+                    print(f"❌ 分页解析错误: {e}")
             else:
-                print("⚠️ 未找到分页数据，可能只有 1 页，或被反爬拦截。")
+                print("⚠️ 未检测到分页信息")
